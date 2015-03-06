@@ -1,0 +1,286 @@
+#!/bin/bash
+#
+# This is dips. 
+# Duplicate IP Scanner.
+# This script checks for IP duplicates on the local subnet.
+# Robert Montgomery February 24, 2012
+# 
+# synopsis:
+# dupscan <ip address or range> <interface name>
+#
+# IP can be a single address or a hyphen (-) separated range on the 4rth octet.
+# If no arguments are present on the command line, dupscan will scan based on 
+# the values held in the script under "Variable Declarations". If values are not
+# found in the script, it will divine the subnet based on the local machines IP
+# and assuming a /24 network, and will attempt to divine the network interface used.
+#
+###################################
+# @@@@@ Versioning @@@@@
+#
+CURRENTVERSION=2.1
+#
+# version 2.1:
+# bug fixes, add logging of IP,MAC of responsive hosts, including this one.
+# add network IP divining rather than exiting with error.
+#
+# version 2.0:
+# add versioning, add devine NIC name if not otherwise provided.
+# tweaked for other n*x's, modularize further, add alternate
+# os compatability.
+#
+# version 1.0:
+# Works great. On Fedora.
+#
+###################################
+# Variable Declarations.
+#
+# RAWIP should be the IP address to scan. If a range is to be scanned, the start and end
+# host addresses should be hyphen (-) delimited, as in: 1.2.3.1-99
+# IF should be the network interface name to be used for scanning eg. etho, wlan0 etcetra.
+# PINGS is the number of times to ping each host. Use no less than 2, and that is probably
+# all you need for a local network. More pings means it will take more time to scan them all.
+# LOGFILE is the location for creating the log of live IP, Mac address pairs including this host.
+#
+#
+#
+RAWIP=
+IF=
+PINGS=2
+LOGFILE=/var/log/dips.log
+#
+#
+#
+# End Variable Declarations.
+###################################
+# Preamble.
+#
+# Display the current version.
+clear
+echo -e "This is dips version $CURRENTVERSION"
+sleep 1
+# Let's see if we should bother loading memory.
+cmd=`which arping`
+if [ ! -e "$(which arping)" ]; then
+	echo -e "\nCommand arping is not installed.\n"
+	exit 1
+fi
+#
+#
+#################################################
+# Function Declarations.
+#
+###
+test_args(){
+	if [ -n "$1" ];then
+		ckip="echo -e $1 | tr '.' 'Z'"
+		if [ "$ckip" = "$1" ];then
+			arg_error $1 $2
+		else
+			RAWIP=`echo -e $1`
+			if [ -n "$2" ];then
+				if [ "$(cat /proc/net/dev | grep -o $2)" != "$2" ];then
+					arg_error $1 $2
+				else
+					IF=`echo -e $2`
+				fi
+			else
+				echo "No interface given on command line. Checking value from script..."
+#				echo -e "The script value for IF is: $IF"
+				if [ -z "$IF" ];then
+					echo -e "No interface given in script either."
+					IF=`ifconfig -s | tail -n 2 | grep -v "^lo " | cut -f1 -d" "`
+					[ -z "$IF" ] && arg_error $1 $2
+					if [ -z "$IF" ];then
+						arg_error $1 $2
+					else
+						echo -e "Using presumed interface $IF"
+					fi
+				fi
+			fi
+		fi
+	else
+		echo "No arguments given on command line. Checking values from script..."
+		if [ -z "$RAWIP" ];then
+#			arg_error
+			get_net
+			echo -e "No IP's given, so I am going to scan the local subnet $RAWIP"
+		fi
+		if [ -z "$IF" ];then
+			IF=`ifconfig -s | tail -n 2 | grep -v "^lo " | cut -f1 -d" "`				 
+			if [ -z "$IF" ];then 
+				echo "No interface provided and I can't figure it out."
+				exit 1
+			else
+				echo -e "Using presumed interface $IF"
+			fi
+		fi
+	fi
+}
+###
+arg_error(){
+	echo "###############################################################"
+	echo -e "\n   #### Error with arguments. ####"
+	echo -e "\t"$1 $2
+	echo -e "Syntax is: $0 [ip address(s)] [interface to use]"
+	echo "You must specify ip's in order to specify an interface."
+	echo "If a range of addresses is to be scanned,"
+	echo -e "separate the start and end host addresses with a hyphen (-)."
+	echo -e "Both IP address(s) and interface must be provided,"
+	echo -e "if not on the command line, then in the script. The script will" 
+	echo -e "make an attempt to discover the interface if all else fails, but"
+	echo -e "it may or may not figure it out.\n"
+	echo "###############################################################"
+	exit 1
+}
+###
+varprep(){
+	NETWORK=$(echo -e $RAWIP | cut -d "." -f 1-3)
+	HOSTRANGE=$(echo -e $RAWIP | cut -d "." -f 4)
+	LOWIP=$(echo -e $HOSTRANGE | cut -d - -f 1)
+	HIGHIP=$(echo -e $HOSTRANGE | cut -d - -f 2)
+	IPTEST=$(echo -e "$NETWORK.$LOWIP")
+	test_ip "$IPTEST"
+	IPTEST=$(echo -e "$NETWORK.$HIGHIP")
+	test_ip "$IPTEST"
+	TOTALHOSTS=$(((HIGHIP - LOWIP)+1))
+}
+###
+get_net(){
+	get_myip
+	NET=`echo -e "$MYIP" | cut -d "." -f1-3`
+	RAWIP=`echo -e "$NET.1-254"`
+	if [ -z "$RAWIP" ];then
+		arg_error
+		exit 1
+	fi
+}
+###
+get_myip(){
+MYIP=`ip addr | grep -v vmnet | grep -o \
+'[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}' \
+| grep -v 255. | grep -v 127.0 | grep -v .255 | awk -F "\n" '{ print $1 }'`
+}
+###
+get_myif(){
+#	if [ -z "$2" -a -z "$IF" ];then
+#	if [ -z "$IF" ];then
+		IF=`ifconfig -s | tail -n 2 | grep -v "^lo " | cut -f1 -d" "`
+#	fi
+}
+###
+test_ip(){
+	if [ -n "$(echo -e $IPTEST | grep "-")" ];then
+		arg_error
+	fi
+	for ((octet=1;octet<=4;octet++));do
+	num=`echo -e $IPTEST | cut -d "." -f $octet`
+	digits=$(echo -e $num | grep -o '[0-9]\{1,3\}')
+		if [ -n "$digits" ];then
+			if [ "$octet" -ne 4 ];then
+				if [ "$num" -lt 0 -o "$num" -gt 255 ];then
+					echo "You have entered an invalid IP address."
+					echo -e $num
+					echo -e $IPTEST
+					exit 1
+				fi
+			else
+				if  [ "$num" -lt 1 -o "$num" -gt 254 ] ;then
+					echo "You have entered an invalid host IP address."
+					echo $num
+					echo -e $IPTEST
+					exit 1
+				fi
+			fi				
+		else
+			echo "You have entered an invalid IP address."
+			echo -e $IP
+			exit 1
+		fi
+	done
+}
+###
+find_duplicates(){
+	alive=''
+	duplicates=''
+	LIVECOUNT=0
+	DOWNCOUNT=0
+	DUPCOUNT=0
+	[ -f $LOGFILE ] && rm -f $LOGFILE
+#
+	for ((HIP=LOWIP;HIP<=HIGHIP;HIP++));do
+		if [ "$MYIP" != "$NETWORK.$HIP" ];then
+			answer=`arping -c $PINGS -I $IF $NETWORK.$HIP | grep -v "ARPING" | grep -v "Sent" | grep -v "Received" |cut -d "[" -f 2 | cut -d "]" -f 1 | tr '\n' ','`
+			if [ "$?" -ne 0 ];then
+				echo "error with arping. This indicates a bug in the script."
+				exit 1
+			fi
+			answer=(${answer//,/ })
+			if [ "x${answer[0]}" = x ];then
+				echo -e "Host IP $NETWORK.$HIP is down."
+				DOWNCOUNT=$((DOWNCOUNT + 1))
+			elif [ "${answer[0]}" != "${answer[1]}" ];then
+				if [ "x${answer[1]}" != x ];then
+					echo -e "\nMAC 1 is: ${answer[0]}	MAC 2 is: ${answer[1]}"
+					echo -e "Host IP $NETWORK.$HIP is duplicated on the network!!!\n"
+					duplicates+=`echo -e "$NETWORK.$HIP\t${answer[0]}\t${answer[1]}\n"`
+					DUPCOUNT=$((DUPCOUNT + 1))
+				else
+					alive+=`echo -e "$NETWORK.$HIP <-Partial ping response; "`
+					LIVECOUNT=$((LIVECOUNT + 1))
+				fi
+			else
+				if [ "${answer[0]}" = "${answer[1]}" ]; then
+					echo -e "Host IP $NETWORK.$HIP is alive and not duplicated."
+					alive+=`echo -e "$NETWORK.$HIP; "`
+					`echo -e "$NETWORK.$HIP,$answer" >> $LOGFILE`
+					LIVECOUNT=$((LIVECOUNT + 1))
+				fi
+			fi
+		else
+			echo -e "Host IP $MYIP is me."
+			alive+=`echo -e $MYIP "<-This is me.;"`
+			MYMAC=`ifconfig |grep HWaddr | grep wlan |cut -d " " -f10`
+			`echo -e $MYIP,$MYMAC >> $LOGFILE`
+			TOTALHOSTS=$(($TOTALHOSTS - 1))
+			notice="Note: I am unable to scan my own IP address."
+		fi
+	done
+}
+###
+summary_(){
+	clear
+	echo -e "\n\n***Out of $TOTALHOSTS total scanned host IP addresses;***"
+	echo -e "There are $LIVECOUNT responsive hosts in the scanned range."
+	echo -e "There are $DOWNCOUNT unresponsive hosts in the scanned range."
+	echo -e "There are $DUPCOUNT duplicated host addresses in the scanned range."
+#
+	if [ "$notice" ];then
+		echo -e $notice
+	fi
+#
+	if [ "${alive}" ];then
+		echo -e "\nLiving hosts are at: " ${alive[@]}
+	fi
+#
+	if [ "${duplicates}" ];then
+		echo -e "\n************************************"
+		echo -e "\nDuplicated IP addresses on the network are:\n"${duplicates[@]}
+		echo -e "\n************************************"
+	else
+		echo -e "\nNo duplicated IP addresses were found in the given range.\n"
+		echo -e "The log of IP,MAC addresses for responding hosts including this one"
+		echo -e "is located at $LOGFILE\n"
+	fi
+}
+###
+# End Function Declarations.
+#################################################
+### MAIN ###
+test_args $1 $2 
+varprep $RAWIP $IF
+[ -z "$MYIP" ] && get_myip
+find_duplicates $IF
+summary_
+exit 0
+
+
